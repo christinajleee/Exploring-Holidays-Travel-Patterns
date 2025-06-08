@@ -1,0 +1,543 @@
+---
+title: "CCAR Studio"
+subtitle: "Sta 323 - Final Project"
+format: 
+  html:
+    self-contained: true
+author:
+- Christina Lee
+- Richard Jiang
+- Claire Li
+- Ajani Adovor
+---
+
+### Introduction
+
+As our group began our brainstorm on ideas to investigate using the tools we've learned in STA323, we agreed that whatever topic we would explore would need to have publicly available and substantially sized data sets with many variables. This was to ensure that our visualizations would have multiple angles and components to explore from. Ultimately, we chose to investigate the relationship between the time of year of travel and travel volume. We hypothesized that busy times of year, like the summer months (depending on the hemisphere) and major holidays would coincide with spikes in travel volume.
+
+Using the Global Holidays and Travel data set from TidyTuesday,(https://github.com/rfordatascience/tidytuesday/blob/main/data/2024/2024-12-24/readme.md) our plan for this project was to create an interactive Shiny dashboard that explores the relationship between time of year (especially around national holidays) and travel patterns. The data set has the data broken down by country, allowing us to examine travel trends by time and by country. We originally wanted our Shiny app dashboard to output the following once the user selected a country:
+
+1.  An annotated time series graph showing monthly travel data with holiday events marked
+2.  A color-coded heat map displaying seasonal patterns in holiday occurrences by type
+3.  A detailed table listing specific holidays with their corresponding travel statistics.
+
+This would've emphasized the effect that holidays have on travel behavior and allowed users to choose a holiday and country of interest to investigate visually. However, we ran into issues with this approach, in part because the data set we used only shows specific month-year data, but not individual days. We attempted to work around it by having a user select the month and then have both holiday data for the month and travel data be displayed, but we ultimately decided that the information was non-informative and not relevant to our original goal. The bare bones version of that app is saved as app2.r in the Shiny folder.
+
+We created another trial of the app in app2.r and saved it as app3.r. Since the initial app only showed statistics, we thought it would be interesting to add a visual representation of monthly travel trends and top destination countries by month. We updated the app to include a world map that highlights and labels specific countries based on travel volume for the selected month. We also added a line plot with points to show the average travel volume for the selected month compared to other months. This way, users can visually identify which countries and months may not be optimal for travel. This set us up for what we wanted for our third and final design update for what we wanted for the app.
+
+For our final version, we settled on the following user experience goals:
+
+Our target demographic for our Shiny App is a prospective traveler, looking to avoid the higher prices and long delays that typically come with travelling during peak times. Therefore, when deciding on travel dates for a specific country, they would be interested in viewing the travel volume trends over time for that country to avoid its peak season. Furthermore, in order to avoid busy holiday travel seasons, the user would also want to know what times of the year coincide with the most holidays in that country (when more people would be free to travel). Finally, once the user has settled on a specific month and country to travel in, as one final check, they would want to the exact dates and names of the holidays that occur during that month (a user would be concerned about traveling on a country's Independence Day, for example, but unconcerned about traveling on National Talk Like a Pirate Day).
+
+Therefore, our Shiny Dashboard will output the following:
+
+1.  A line plot, displaying the monthly travel volume for the years in our data set for the country or countries selected. An interactive and movable world map will be included, which will prompt the user to click on their country or countries of interest. The line plot will update based on the selected countries.
+
+2.  A heat map, displaying the number of public holidays per month and year in our data set for the country selected. Year will be displayed on the X axis and Month on the Y axis, and a color scale will be used to visualize the number of public holidays in each Month-Year combination. The user will again be prompted with the interactive world map and the option to select a country to investigate.
+
+3.  A table listing specific holidays for the selected country observed in that month across all available years for your selected country or countries. Clicking on a holiday name in that first table populates the bottom table with the exact dates on which that holiday fell, again covering every year in the dataset. 
+
+Order to Run Code:
+
+Keep in mind that our project is designed for a user to run our project.qmd code all the way through first and then run our final app, which is saved as app.R in the Shiny folder in our project.
+
+### Data Wrangling
+
+```{r include=FALSE}
+# load in the data and necessary packages
+global_holidays <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2024/2024-12-24/global_holidays.csv')
+
+monthly_passengers <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2024/2024-12-24/monthly_passengers.csv')
+
+library(tidyverse)
+library(withr)
+
+# URL paths
+url <- "https://data.worldpop.org/GIS/Holiday_Data/public_holidays/public_holidays_2010_2019.zip"
+path <- withr::local_tempfile(fileext = ".zip")
+download.file(url, path)
+global_holidays <- readr::read_csv(path) |> 
+  dplyr::mutate(Date = lubridate::dmy(Date),
+                Year = lubridate::year(Date),
+                Month = lubridate::month(Date),
+                Day = lubridate::day(Date)) |>
+  filter(Year >= 2010 & Year <= 2018)
+
+
+url <- "https://data.worldpop.org/GIS/Flight_Data/monthly_volume_of_airline_passengers/monthly_vol_of_airline_pass_in_90_countries_2010_2018.zip"
+path <- withr::local_tempfile(fileext = ".zip")
+download.file(url, path)
+monthly_passengers <- readr::read_csv(path) |>
+  dplyr::mutate(
+    dplyr::across(c(Year, Month), as.integer)
+  ) |>
+  filter(Year >= 2010 & Year <= 2018)
+```
+
+```{r include=FALSE}
+library(openxlsx)
+library(readxl)
+library(purrr)
+
+# read in data
+tourism <- read_xlsx("Indicator-8_9_1-2022-UN_Tourism_april2024_update.xlsx")
+
+# limit from 2010 to 2018
+tourism <- tourism |>
+  filter(TimePeriod >= 2010 & TimePeriod <= 2018)|>
+  group_by(GeoAreaName) 
+```
+
+```{r}
+# Process datasets
+# combine monthly passenger counts with holiday metadata
+holidays_travel <- monthly_passengers |>
+  left_join(global_holidays,
+            # country code, year, and month
+            by = c("ISO3", "Year", "Month"))
+```
+
+```{r}
+# build a lookup table of unique ISO3 codes and their corresponding country names
+# renaming ADM_name to “Country” and sorting alphabetically
+country_names <- global_holidays |>
+  distinct(ISO3, Country = ADM_name) |>
+  arrange(Country)
+
+# vector of codes for select feature later
+country_choices <- setNames(country_names$ISO3, country_names$Country)
+```
+
+```{r}
+# organizing holidays
+holidays_summary_flags <- global_holidays |>
+  group_by(ISO3, Year, Month) |>
+  summarise(
+    num_total_holidays = n(),
+    has_public_holiday = any(Type == "Public holiday", na.rm = TRUE),
+    has_local_holiday = any(Type == "Local holiday", na.rm = TRUE),
+    has_special_holiday = any(Type == "Special holiday", na.rm = TRUE),
+    count_public_holidays = sum(Type == "Public holiday", na.rm = TRUE), 
+    count_local_holidays = sum(Type == "Local holiday", na.rm = TRUE), 
+    count_special_holidays = sum(Type == "Special holiday", na.rm = TRUE),
+    # drop grouping after summarizing
+    .groups = 'drop' 
+  )
+```
+
+```{r}
+monthly_data_joined_flags <- monthly_passengers |>
+  # join passenger data with holiday flag summary by country, year, and month
+  left_join(holidays_summary_flags, by = c("ISO3", "Year", "Month"))
+
+# replace all missing holiday flags/counts with 0 or FALSE defaults
+monthly_data_cleaned_flags <- monthly_data_joined_flags |>
+  mutate(
+    num_total_holidays = replace_na(num_total_holidays, 0),
+    has_public_holiday = replace_na(has_public_holiday, FALSE),
+    has_local_holiday = replace_na(has_local_holiday, FALSE),
+    has_special_holiday = replace_na(has_special_holiday, FALSE),
+    count_public_holidays = replace_na(count_public_holidays, 0),
+    count_local_holidays = replace_na(count_local_holidays, 0),
+    count_special_holidays = replace_na(count_special_holidays, 0)
+  )
+
+monthly_data_cleaned_flags <- monthly_data_cleaned_flags |>
+   # add a proper Date column set to the first day of each year month
+  mutate(date = make_date(Year, Month, 1))
+```
+
+#### Cleaned up data wrangling
+
+```{r}
+library(readr)
+library(dplyr)
+library(lubridate)
+
+# cleaning again
+tmp_hol <- tempfile(fileext = ".zip")
+download.file(
+  "https://data.worldpop.org/GIS/Holiday_Data/public_holidays/public_holidays_2010_2019.zip",
+  tmp_hol
+)
+global_holidays <- read_csv(tmp_hol) |>
+  mutate(
+    Date  = dmy(Date),
+    Year  = year(Date),
+    Month = month(Date)
+  ) |>
+  filter(Year >= 2010 & Year <= 2018)
+
+tmp_pass <- tempfile(fileext = ".zip")
+download.file(
+  "https://data.worldpop.org/GIS/Flight_Data/monthly_volume_of_airline_passengers/monthly_vol_of_airline_pass_in_90_countries_2010_2018.zip",
+  tmp_pass
+)
+monthly_passengers <- read_csv(tmp_pass) |>
+  mutate(
+    Year  = as.integer(Year),
+    Month = as.integer(Month)
+  ) |>
+  filter(Year >= 2010 & Year <= 2018)
+
+# combine travel trends
+holidays_travel <- monthly_passengers |>
+  # Total_OS for each ISO3–Year–Month
+  left_join(global_holidays, by = c("ISO3", "Year", "Month"))
+
+# summarize holiday counts
+holidays_summary_flags <- global_holidays |>
+  group_by(ISO3, ADM_name, Year, Month) |>
+  summarise(
+    num_total_holidays     = n(),
+    count_public_holidays  = sum(Type == "Public holiday",  na.rm = TRUE),
+    count_local_holidays   = sum(Type == "Local holiday",   na.rm = TRUE),
+    count_special_holidays = sum(Type == "Special holiday", na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# merge flags into monthly_data_cleaned_flags
+monthly_data_cleaned_flags <- monthly_passengers |>
+  left_join(holidays_summary_flags, by = c("ISO3", "Year", "Month")) |>
+  mutate(
+    num_total_holidays     = ifelse(is.na(num_total_holidays),     0, num_total_holidays),
+    count_public_holidays  = ifelse(is.na(count_public_holidays),  0, count_public_holidays),
+    count_local_holidays   = ifelse(is.na(count_local_holidays),   0, count_local_holidays),
+    count_special_holidays = ifelse(is.na(count_special_holidays), 0, count_special_holidays),
+    date = make_date(Year, Month, 1)
+  )
+
+# compute travel volume thresholds
+travel_percentiles <- holidays_travel |>
+  summarise(
+    low_thresh  = quantile(Total_OS, probs = 1/3, na.rm = TRUE),
+    high_thresh = quantile(Total_OS, probs = 2/3, na.rm = TRUE)
+  )
+
+# year range and latest_year
+year_range  <- range(holidays_travel$Year, na.rm = TRUE)
+latest_year <- max(holidays_travel$Year, na.rm = TRUE)
+```
+
+Data Wrangling Write Up: The goal of our data wrangling was to effectively combine our monthly travel dataset with the global holidays dataset, which contains date and country information for all holidays, into a format usable for our Shiny app. First, our code downloads and processes global holiday and monthly airline passenger data, parsing and filtering them by date and ensuring consistency across variables like year and month. The data wrangling also loads in and filters data from a United Nations tourism data set, which we originally intended on using but ultimately excluded from our final app. The holiday data is summarized by country and month to calculate total holiday counts and classify them into public, local, and special categories. This summary is then merged with the airline passenger data, and missing holiday values are replaced with appropriate defaults (zero or FALSE). Within the merged dataset, the code then creates a standardized date variable. Additionally, metadata, like country names and codes are extracted for later use in the Shiny app. Finally, travel volume percentiles are computed in order to classify months into low, medium, or high travel months , and the data's year range and the most year available in the data set are calculated for later use. We originally intended on having an indicator which displayed whether travel volume during a selected month was low, typical, or high, but we had difficulties implementing it and ultimately decided to exclude it from the final version. The final result is a combined data set, named monthly_data_cleaned_flags, which we will be able to use to pull out country, date, holiday, and travel volume information for our Shiny app.
+
+### Exploratory Data Analysis
+
+```{r include=FALSE}
+# load libraries
+library(dplyr)
+library(ggplot2)
+library(viridis)
+```
+
+```{r}
+# summary statistics of holiday travel
+holidays_travel |>
+  group_by(Type) |>
+  summarize()
+```
+
+We grouped our "holidays_travel" data by "Type" to list all the holiday categories. That check revealed eight distinct types plus some replacement workdays and NAs, so we know exactly which records to clean. Those counts could be useful in adding into our app’s holiday statistics along with the travel volume.
+
+```{r}
+# global monthly passenger volume 
+monthly_data_cleaned_flags |>
+  group_by(date) |>
+  summarise(Global_Total_OS = sum(Total_OS, na.rm = TRUE),
+            Global_Total = sum(Total, na.rm = TRUE)) |>
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = Global_Total_OS, color = "Total_OS")) +
+  geom_line(aes(y = Global_Total, color = "Total")) +
+  labs(title = "Global Monthly Passenger Volume (2010-2018)",
+       y = "Passenger Volume (Thousands)",
+       x = "Date",
+       color = "Data Source") +
+  theme_minimal()
+```
+
+We grouped our cleaned monthly travel data by date to compute two series including the total global passenger volume and international only volume. We then plotted both lines in ggplot to highlight clear seasonal peaks and the upward trend from 2010 to 2018 (drop also reflected for incomplete data). This global trend chart is a good example that can provide insight to a baseline so users can compare a country’s travel pattern with trends globally.
+
+```{r}
+# plot Total_OS for a few countries
+monthly_data_cleaned_flags |>
+  # select a few countries
+  filter(ISO3 %in% c("USA", "GBR", "FRA", "JPN")) |> 
+  ggplot(aes(x = date, y = Total_OS)) +
+  geom_line() +
+  facet_wrap(~ISO3, scales = "free_y")
+  labs(title = "Monthly Total_OS Passenger Volume by Country (2010-2018)",
+       y = "Passenger Volume (Thousands)",
+       x = "Date") +
+  theme_minimal()
+```
+
+We filtered the clean monthly travel data to four key countries (USA, GBR, FRA, JPN) and plotted each country's passenger volume over time using facet_wrap. By giving each panel its own y-scale, we can clearly see both the seasonal peaks and long run growth in large and smaller markets. This comparison could be useful to see a country’s travel pattern with others in the app.
+
+```{r}
+# average Monthly Total_OS Passenger Volume by Country (2010-2018)
+monthly_data_cleaned_flags |>
+  group_by(ISO3, Month) |>
+  summarise(Avg_Total_OS = mean(Total_OS, na.rm = TRUE),
+            Avg_Total = mean(Total, na.rm = TRUE),
+            .groups = 'drop') |>
+  # select countries
+  filter(ISO3 %in% c("USA", "GBR", "FRA", "JPN")) |> 
+  ggplot(aes(x = Month, y = Avg_Total_OS)) +
+  geom_line() +
+  facet_wrap(~ISO3, scales = "free_y") +
+  labs(title = "Average Monthly Total_OS Passenger Volume by Country (2010-2018)",
+       y = "Average Passenger Volume (Thousands)",
+       x = "Month") +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  theme_minimal()
+```
+
+These figures are similar to the EDA we did above. However, x-axis is by month to see how the average passenger volume changes monthly over the years (averaged). This also provides good insight and could potentially be used as inspiration for a feature in the app.
+
+```{r}
+# average Holiday Frequency by Month (Global)
+monthly_data_cleaned_flags |>
+  group_by(Month) |>
+  summarise(Total_Public_Holidays = sum(count_public_holidays, na.rm = TRUE), 
+            Total_Local_Holidays = sum(count_local_holidays, na.rm = TRUE), 
+            Total_Special_Holidays = sum(count_special_holidays, na.rm = TRUE),
+            .groups = 'drop') |>
+  tidyr::pivot_longer(cols = starts_with("Total_"), 
+                      names_to = "Holiday_Type", 
+                      values_to = "Total_Count_Globally") |>
+  ggplot(aes(x = Month, y = Total_Count_Globally, fill = Holiday_Type)) +
+  geom_col(position = "stack") +
+  labs(title = "Total Count of Specific Holiday Types by Month (Global, 2010-2018)", 
+       y = "Total Count of Holidays (Global)", 
+       x = "Month",
+       fill = "Holiday Type") +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  theme_minimal()
+```
+
+We grouped the holiday flags by Month and summed up public, local, and special holiday counts to capture global holiday frequency across the year. We then plotted those totals as a stacked bar chart, which clearly highlights the seasonal peaks in January, May, and December. We could incorporate this holiday frequency chart into our app so users can easily identify and avoid the busiest holiday months when planning their trips.
+
+```{r}
+# heat map of seasonal holiday US travel 
+# select USA as the country of interest (ISO3 code for USA came from tidytuesday data directly )
+iso3_sel <- "USA"
+
+# filter the holiday data for the selected country
+df_heat <- holidays_travel |>
+  # count number of holidays by month, type, and region (USA)
+  filter(ISO3 == iso3_sel) |>
+  # group by month, holiday type, and region
+  group_by(Month, Type, ADM_name) |>
+  # count how many holidays occur in each group
+  summarise(holiday_count = n(),         
+            .groups = "drop")
+
+# plotting heat map of holiday counts
+ggplot(df_heat, aes(x = Month, y = Type, fill = holiday_count)) +
+  # outline country with a white border for visual benefits 
+  geom_tile(color = "white") +           
+  scale_x_continuous( 
+    # based on months 1-12
+    breaks = 1:12,
+    labels = month.abb
+  ) +
+  scale_fill_gradient(
+    # light for low counts
+    low  = "lightblue",
+    # dark for high counts
+    high = "darkblue",  
+    name = "Holiday Count"
+  ) +
+  labs(
+    title = paste0("Seasonal Holiday Pattern — US"),
+    x     = "Month",
+    y     = "Holiday Type"
+  ) +
+  theme_minimal() +               
+  theme(
+    panel.grid   = element_blank(),
+    axis.text.x  = element_text(angle = 45, hjust = 1), 
+    plot.title   = element_text(hjust = 0.5)    
+  )
+```
+
+We filtered our "holidays_travel" data to the USA and counted how many public holidays, observances, and local observances occur in each month. We then plotted those counts as a heatmap with months on the x-axis, holiday types on the y-axis, and color intensity showing holiday frequency. We see that observances spike in May and December, and local observances peak in February. We could add this country specific holiday heatmap into our app to help users quickly spot the busiest holiday months by type when planning their trips.
+
+```{r}
+# summary statistics for monthly travel data for holidays in the data set
+holiday_summary <- holidays_travel |>
+  group_by(Name) |>
+  summarize(
+    # total observations
+    n_obs = n(),
+    # pulling summary stats
+    avg_total = mean(Total_OS, na.rm = TRUE), 
+    sd_total = sd(Total_OS, na.rm = TRUE),
+    min_total = min(Total_OS, na.rm = TRUE),
+    max_total = max(Total_OS, na.rm = TRUE),
+    
+    # displaying the range in years in the data set for each holiday
+    first_year = min(Year, na.rm = TRUE),
+    last_year = max(Year, na.rm = TRUE)
+  ) |>
+  # sort the holidays by average total travel
+  arrange(desc(avg_total))  
+
+print(holiday_summary)
+```
+
+We grouped our "holidays_travel" data by holiday Name and pulled summary stats that show the count of observations, mean, SD, min/max of international passenger volume, and the first and last years each holiday appears. We could implement some of this holiday summary data in our app so users can quickly see which specific holidays drive the biggest travel spikes when choosing their dates.
+
+```{r}
+# months with the most holidays
+
+# find month with the maximum number of holidays
+max_holidays_months <- monthly_data_cleaned_flags |>
+  filter(num_total_holidays == max(num_total_holidays, na.rm = TRUE))
+
+print(max_holidays_months |> select(Year, Month, date, num_total_holidays))
+```
+
+We filtered to find which month-year combinations had the highest total holiday counts and discovered that May, every year from 2014 through 2018, peaked with 21 holidays. By isolating those peak holiday months, we can flag May as the busiest holiday period globally. We could add this insight in our app so users instantly see that May is consistently the most holiday packed month and plan around it.
+
+```{r}
+# summary of holidays
+glimpse(holiday_summary)
+```
+
+This shows a quick glance of what our holiday stats are including the average total, minimum, maximum, etc of average travel passengers. Even though it is simple, this provides great insight that can be implemented into our app.
+
+```{r}
+# percentage breakdown of holiday types for each month
+# calculate percentages per month
+holiday_type_percentages <- monthly_data_cleaned_flags |>
+  group_by(Month) |>
+  summarize(
+    total_holidays = sum(num_total_holidays, na.rm = TRUE),
+    total_public = sum(count_public_holidays, na.rm = TRUE),
+    total_local = sum(count_local_holidays, na.rm = TRUE),
+    total_special = sum(count_special_holidays, na.rm = TRUE)
+  ) |>
+  mutate(
+    pct_public = 100 * total_public / total_holidays,
+    pct_local = 100 * total_local / total_holidays,
+    pct_special = 100 * total_special / total_holidays
+  ) |>
+  select(Month, pct_public, pct_local, pct_special)
+
+# reshape data into long format for easier plotting
+holiday_type_long <- holiday_type_percentages |>
+  pivot_longer(
+    cols = starts_with("pct_"),
+    names_to = "holiday_type",
+    values_to = "percentage"
+  ) |>
+  mutate(
+    holiday_type = case_when(
+      # rename variables for the plot labels
+      holiday_type == "pct_public" ~ "Public Holiday",
+      holiday_type == "pct_local" ~ "Local Holiday",
+      holiday_type == "pct_special" ~ "Special Holiday"
+    )
+  )
+
+# plot grouped barplot
+ggplot(holiday_type_long, aes(x = factor(Month), y = percentage, fill = holiday_type)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Percentage Breakdown of Holiday Types by Month",
+    x = "Month",
+    y = "Percentage of Holidays",
+    fill = "Holiday Type"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme_minimal(base_size = 14)
+```
+
+We calculated each month’s share of public, local, and special holidays by grouping our holiday flags by month and turning totals into percentages. We then plotted those percentages as a grouped bar chart, which makes it clear that months like May and January are overwhelmingly public/holiday driven while local and special holidays fill out the less eventful months (public holiday is still the majority for all months). We could add this percentage breakdown into our app so users can instantly see not just how many holidays fall in each month, but exactly what kind of holidays there are when choosing travel dates.
+
+### Methods / Implementation for the Shiny App
+
+The application was constructed with a focus on providing users with a dynamic interface to explore countries’ holiday information and travel volume that aids their travel planning. Our primary aim was to deliver a user experience that is both intuitive and informative, allowing users to select one or multiple countries on a world map and then examine travel trends, seasonal holiday patterns, and detailed holiday information. All code is stored in the `app.R` file.
+
+#### I. **Initial set up and project structure**
+
+The foundation of the application was established using the Shiny framework within the R programming environment. The fundamental architecture comprises a User Interface (UI), formally defined utilizing the `fluidPage` layout function, and a corresponding Server function, initiated as `server <- function(input, output, session) { ... }` to manage the application's reactivity, execute data processing tasks, and render the various outputs presented to the user. Essential R libraries, including shiny, tidyverse, leaflet, sf, rnaturalearth, DT, ggplot2, dplyr, bslib, and plotly, were loaded to provide the necessary functionalities for data manipulation, mapping, visualization, and interactive elements. The shinyjs package was also included to enable dynamic UI behaviors, such as conditional element visibility.
+
+#### **II. Interface design**
+
+The user interface employs a two-column layout. On the left, a world map rendered with Leaflet enables direct interaction: users click on country polygons to select or deselect them. Polygons are dynamically colored to indicate whether a country has no data (light gray), is available but not selected (white), or is actively selected (steel blue). A legend clarifies these states, and any attempt to click on a country lacking data triggers a brief notification rather than a silent failure. On the right, a tabbed panel presents three synchronized views.
+
+The “Time Trends” tab features an interactive Plotly chart displaying monthly travel volumes—scaled to thousands—with dashed vertical lines marking months that contain at least one public holiday. The “Seasonal Holiday Patterns” tab presents a static ggplot heatmap of holiday counts by year and month. Finally, the “Holiday Details” tab offers two data tables: the first lists unique holiday names in the selected month across all years, and the second, which appears when a user clicks on a holiday name, lists every date on which that holiday occurred.
+
+#### **III. Core reactivity**
+
+The interactive state of the application is managed through reactive programming. A central reactive value, `selected_iso3s`, initialized as `reactiveVal(character())`, stores a vector of ISO3 codes corresponding to the countries currently selected by the user. This reactive value serves as the primary driver for filtering downstream data and updating visualizations.
+
+#### **IV. User interaction handling**
+
+User interaction for country selection is primarily facilitated through the interactive map with the Map Click Observer (observeEvent(input\$country_map_selector_shape_click, ...)). Upon a click, it retrieves the layerId of the clicked polygon, which corresponds to the country's ISO3 code. It first checks if the clicked country has data available. If data is not available, a warning notification is displayed. If data is available, the observer updates the selected_iso3s reactive value: if the clicked country's ISO3 is already in the vector, it is removed (deselected); otherwise, it is added (selected). This mechanism enables multi-country selection directly from the map.
+
+#### V. **Reactive Data Filtering for Visualizations**
+
+Several reactive expressions are defined to filter and prepare data subsets for the various visualizations based on the user's selections.
+
+For example, `country_data_monthly` travel data for selected countries, summarizes monthly volume (using `Total` as fallback for `Total_OS`), and prepares data for the time trends plot; `country_holiday_markers` filters for selected countries and months with public holidays (count_public_holidays \> 0). It identifies distinct Year and Month combinations and creates a date column, used for adding markers to the time trends plot; and `country_holiday_heatmap_data` filters monthly_data_cleaned_flags for the selected_iso3s and selects columns relevant for the heatmap (Year, Month, holiday counts, ADM_name)
+
+#### **VI. Visualization rendering**
+
+The application renders three main outputs in the main panel tabs. Dynamic titles (renderText) are used for each tab to provide context based on the selected countries and month.
+
+Time Trends Plot presents an interactive Plotly time series chart (`output$country_travel_time_plot <- renderPlotly({...})`) that visualizes the monthly overseas travel volume for the selected countries over time. The y-axis displays the travel volume in thousands, formatted with commas for readability. The plot uses distinct colors to represent different selected countries, allowing for easy comparison of their travel patterns. Custom tooltips are implemented to provide detailed information upon hovering over data points, including the country, travel volume (in thousands), and the specific month and year.
+
+Seasonal Holiday Heatmap features a static ggplot heatmap (`output$holiday_heatmap <- renderPlot({...})`) for each country selected. The heatmap displays the number of public holidays per month and year, with color intensity representing the count. This visualization helps users quickly identify months and years with a higher or lower frequency of public holidays, providing insights into potential seasonal influences on travel. Separate panels are generated for each selected country using `facet_wrap`, allowing for side-by-side comparison of holiday patterns across different locations.
+
+Detailed Holiday Tables tab provides a detailed breakdown of specific holidays for the selected countries and month across all available years, presented through two linked interactive data tables (`output$detailed_holiday_table <- renderDT({...}`) and `output$holiday_dates_table <- renderDT({...})`). The first table (`detailed_holiday_table`) displays a list of unique holiday names found in the selected month for the chosen countries, along with their type and the country they occur in. Users can click on a specific holiday name in this table. This selection dynamically updates the second table (`holiday_dates_table`), which then displays only the dates on which that particular holiday occurred in the selected month across all years and selected countries. This two-table structure allows users to first identify relevant holidays and then drill down to see their specific occurrences over time. Both tables utilize interactive features provided by the DT package, such as pagination and searching, and include dynamic captions to provide context based on the current selections.
+
+#### **VII. Error Handling and Robustness**
+
+Throughout the application, we prioritized graceful failure and clear user feedback over abrupt crashes. The use of `req()` statements prevents reactive expressions from executing until all prerequisites—such as a nonempty selection or a valid month input—are met. Coalescing of travel volume fields and careful supply of zero-padded date conversion guard against data format inconsistencies. By constructing a strict one-to-one lookup table, we eliminate many-to-many join warnings and ensure that joins do not inadvertently explode row counts. Notifications inform users when they click on countries with no data, and conditional UI elements (such as the month selector) remain hidden until contextually relevant. Finally, each plotting and table-rendering function includes its own `req()` and `filter(!is.na(…))` checks so that empty or missing data simply results in an empty output rather than an error.
+
+### Discussion
+
+User experience matters most in app implementation, and in order to test that, I worked through a real-life scenario that was relevant to my own life. This semester, one of my friends is studying abroad in Spain. It’s been challenging to find a time to visit him between balancing both of our class schedules and travel prices. Using the app, I wanted to see what holidays in Spain occurred during which month, and how that affected flight patterns. This would help me infer what times may be best to travel based on both passenger travel and holiday cultural significance. For example, if there was an important holiday in Spain in February, it may be a time where my friend would have less work and more availability for us to travel and do things.
+
+![Initial Shiny App](https://rstudio.stat.duke.edu/s/163e5f1f35d1a944b965b/files/project-ccar_studio/Images/Screenshot%202025-05-01%20203003.png)
+
+When the user first opens the shiny app, they are greeted with this page. We implemented an interactive map that you can maneuver through using your mouse. You can use the + and - buttons or your mouse’s scroll wheel to adjust the zoom. Hovering over a country gives you its name and you can select it. I am going to select Spain.
+
+![Time Series Showing Spain Travel Trends](https://rstudio.stat.duke.edu/s/163e5f1f35d1a944b965b/files/project-ccar_studio/Images/Screenshot%202025-05-01%20214043.png)
+
+The default tab is the time series that shows monthly travel volume across all available years. Each data point is a month and hovering over a point gives you more details. You can also interact with the graph and even download an image of it. Note that the stop at 2018 is due to limitations in our data. Unfortunately, our data set does not contain travel data from 2018 and onward. We address this in our “concerns” section.
+
+If you select the tab “Seasonal Holiday Patterns,” a heat map showing holiday density per month per year is shown.
+
+![Heat map for Spain](https://rstudio.stat.duke.edu/s/163e5f1f35d1a944b965b/files/project-ccar_studio/Images/Screenshot%202025-05-01%20205549.png)
+
+In “Holiday Details,” you can see what holidays appear during which month in Spain. An option to select the month appears below the interactive map when you click on Holiday details. I chose May because I think that would be the best time to visit my friend.  
+
+![](https://rstudio.stat.duke.edu/s/163e5f1f35d1a944b965b/files/project-ccar_studio/Images/Screenshot%202025-05-01%20213610.png)
+
+I can now see all of the holidays that occur in Spain during the month of May. This gives me more information about the country and gives more context to fluxes in air travel to Spain during each month. Also, the app can show information about more than one country at a time so you can compare travel patterns and holidays between countries. 
+
+![Travel Comparison between Italy and Spain](https://rstudio.stat.duke.edu/s/163e5f1f35d1a944b965b/files/project-ccar_studio/Images/Screenshot%202025-05-01%20214733.png)
+
+![Comparative Heat Map](https://rstudio.stat.duke.edu/s/163e5f1f35d1a944b965b/files/project-ccar_studio/Images/Screenshot%202025-05-01%20214758.png)
+
+![Holiday Comparison between Italy and Spain](https://rstudio.stat.duke.edu/s/163e5f1f35d1a944b965b/files/project-ccar_studio/Images/Screenshot%202025-05-01%20214843.png)
+
+I can now see that Italy and Spain share the holiday of Labor Day on May 1st. Now instead of traveling in May, I should maybe travel in late April so I can see my friend and go to Italy as well. 
+
+#### **Caveats and Concerns:**
+
+We faced several challenges with the Tidy Tuesday data set. The first of which is the chronological limitations. Since we only have data up to 2018, there’s a lot of data we’re missing, especially considering the way flight patterns may have changed after the Covid-19 pandemic. Another concern is bias in the data. There’s more information about holidays in the US than any other country, and many countries don’t have holiday or travel data at all for certain years. We suspect that this is due to the data collectors having more access to US data versus other countries. Still, the app is a proof of concept, and future tweaks could make its use viable. 
+
+### Conclusion
+
+Given the datasets we had, we think that our app utilizes them well. We think that there’s an opportunity to expand upon the app by adding more dynamic data to provide a fuller picture of travel data. One setback we ran into was the granularity of the data.
+
+ Our holiday statistics data actually only assigns holidays to the monthly statistics in flight data. Technically, for every holiday in the same month of a country, the statistics are the same. Unfortunately for this project, we didn’t have time to extend the usage cases. There are several app upgrades that we could implement at a later date. One of the more simple ones is breaking down passenger data by country airport. We think that this adds a level of specificity that greatly improves user experience. If a user could study the flux of people through a country’s airport, it could help them choose what airport they should fly into. Also more recent data may better reflect travel patterns. 
+
+Beyond personal use, we think that the app has commercial implications as well. Initially, we wanted to provide a fuller view of how tourism and holidays affect each country. We also were able to find the data we needed to complete this task. The UN had tourism datasets that covered inbound/outbound travel, arrival method, travel method, region of travel, tourism expenditure, etc. It also had a data set for the macroeconomic data for tourism in every country. The only caveat was that the data was challenging to work with. Both the data for inbound/outbound tourism travel and the macroeconomic tourism data were in Microsoft Excel files. The Excel file for macroeconomic tourism was relatively easy to read into R. It was not a large file. Unfortunately, with the inbound/outbound data, which would have been better for the shiny app implementation, the formatting for the data did not translate well to R. While I was able to start the data wrangling process, running the code to extract the data took a long time to run and it slowed down our workflow. Because of this, we had to abandon the idea of implementing that data. 
+
+While there were setbacks, our travel shiny app does as intended. The user is able to interact with a world map, select a country, and generate both travel and holiday data. Not only that, they are also able to select multiple countries to compare their travel patterns as well as if they share any holidays. We hope that with better data, the app can be updated to better reflect current travel trends. 
