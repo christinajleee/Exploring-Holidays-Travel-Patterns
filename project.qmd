@@ -80,7 +80,7 @@ library(readxl)
 library(purrr)
 
 # read in data
-tourism <- read_xlsx("Indicator-8_9_1-2022-UN_Tourism_april2024_update.xlsx")
+tourism <- read_xlsx("Indicator-8_9_1-2022-UN_Tourism_april2024_update (1).xlsx")
 
 # limit from 2010 to 2018
 tourism <- tourism |>

@@ -1,0 +1,231 @@
+# Load Dataset
+
+```{r}
+# load in the data and necessary packages
+global_holidays <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2024/2024-12-24/global_holidays.csv')
+
+monthly_passengers <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2024/2024-12-24/monthly_passengers.csv')
+
+library(tidyverse)
+library(withr)
+
+# URL paths
+url <- "https://data.worldpop.org/GIS/Holiday_Data/public_holidays/public_holidays_2010_2019.zip"
+path <- withr::local_tempfile(fileext = ".zip")
+download.file(url, path)
+global_holidays <- readr::read_csv(path) |> 
+  dplyr::mutate(Date = lubridate::dmy(Date),
+                Year = lubridate::year(Date),
+                Month = lubridate::month(Date),
+                Day = lubridate::day(Date)) |>
+  filter(Year >= 2010 & Year <= 2018)
+
+
+url <- "https://data.worldpop.org/GIS/Flight_Data/monthly_volume_of_airline_passengers/monthly_vol_of_airline_pass_in_90_countries_2010_2018.zip"
+path <- withr::local_tempfile(fileext = ".zip")
+download.file(url, path)
+monthly_passengers <- readr::read_csv(path) |>
+  dplyr::mutate(
+    dplyr::across(c(Year, Month), as.integer)
+  ) |>
+  filter(Year >= 2010 & Year <= 2018)
+```
+
+```{r}
+library(openxlsx)
+library(readxl)
+library(purrr)
+
+# read in data
+tourism <- read_xlsx("Indicator-8_9_1-2022-UN_Tourism_april2024_update (1).xlsx")
+
+# limit from 2010 to 2018
+tourism <- tourism |>
+  filter(TimePeriod >= 2010 & TimePeriod <= 2018)|>
+  group_by(GeoAreaName) 
+```
+
+```{r, echo=T, results='hide', error=FALSE, warning=FALSE, message=FALSE}
+# create variable path with link to the file
+path <- "UN inbound-outbound (1).xlsx"
+
+all_sheets  <- excel_sheets(path)
+data_sheets <- setdiff(all_sheets, "Index")
+
+# function that reads one sheet, finds the real header row
+read_clean <- function(sh) {
+  # read in the first 30 rows without names
+  hdr_block <- read_excel(path, sheet = sh, n_max = 30, col_names = FALSE)
+  
+  # locate the row that contains "Units", which is the start of the real header
+  hdr_row   <- which(hdr_block == "Units", arr.ind = TRUE)[1, "row"]
+  
+  # read again, skipping everything up to just before the header row  
+  df_raw <- read_excel(path, sheet = sh, skip = hdr_row - 1)
+  
+  # drop any fully-empty columns
+  df_raw <- df_raw |> select(where(~ !all(is.na(.))))
+  
+  # fill down the Country (first column) so sub-rows inherit it
+  df_filled <- df_raw |> fill(1)
+  
+  # keep only the actual data rows
+  year_cols <- names(df_filled)[grepl("^\\d{4}$", names(df_filled))]
+  df_data   <- df_filled |>
+    filter(if_any(all_of(year_cols), ~ !is.na(.)))
+  
+  # pivot longer into a tidy Year / Value format
+  df_tidy <- df_data |>
+    pivot_longer(
+      cols      = all_of(year_cols),
+      names_to  = "Year",
+      values_to = "Value"
+    ) |>
+    mutate(Indicator = sh)
+  
+  return(df_tidy)
+}
+
+# apply to every data sheet , bind into tidy tibble
+all_data_clean <- map_dfr(data_sheets, read_clean)
+
+# split the sheet-name into Category/Indicator fields
+all_data_clean <- all_data_clean |>
+  separate(Indicator,
+           into = c("Category","Subindicator"),
+           sep  = "-",
+           extra = "merge",
+           fill  = "right")
+```
+
+# Process datasets
+
+```{r}
+# combine monthly passenger counts with holiday metadata
+holidays_travel <- monthly_passengers |>
+  left_join(global_holidays,
+            # country code, year, and month
+            by = c("ISO3", "Year", "Month"))
+```
+
+```{r}
+# build a lookup table of unique ISO3 codes and their corresponding country names
+# renaming ADM_name to “Country” and sorting alphabetically
+country_names <- global_holidays |>
+  distinct(ISO3, Country = ADM_name) |>
+  arrange(Country)
+
+# vector of codes for select feature later
+country_choices <- setNames(country_names$ISO3, country_names$Country)
+```
+
+```{r}
+# organizing holidays
+holidays_summary_flags <- global_holidays |>
+  group_by(ISO3, Year, Month) |>
+  summarise(
+    num_total_holidays = n(),
+    has_public_holiday = any(Type == "Public holiday", na.rm = TRUE),
+    has_local_holiday = any(Type == "Local holiday", na.rm = TRUE),
+    has_special_holiday = any(Type == "Special holiday", na.rm = TRUE),
+    count_public_holidays = sum(Type == "Public holiday", na.rm = TRUE), 
+    count_local_holidays = sum(Type == "Local holiday", na.rm = TRUE), 
+    count_special_holidays = sum(Type == "Special holiday", na.rm = TRUE),
+    # drop grouping after summarizing
+    .groups = 'drop' 
+  )
+```
+
+```{r}
+monthly_data_joined_flags <- monthly_passengers |>
+  # join passenger data with holiday flag summary by country, year, and month
+  left_join(holidays_summary_flags, by = c("ISO3", "Year", "Month"))
+
+# replace all missing holiday flags/counts with 0 or FALSE defaults
+monthly_data_cleaned_flags <- monthly_data_joined_flags |>
+  mutate(
+    num_total_holidays = replace_na(num_total_holidays, 0),
+    has_public_holiday = replace_na(has_public_holiday, FALSE),
+    has_local_holiday = replace_na(has_local_holiday, FALSE),
+    has_special_holiday = replace_na(has_special_holiday, FALSE),
+    count_public_holidays = replace_na(count_public_holidays, 0),
+    count_local_holidays = replace_na(count_local_holidays, 0),
+    count_special_holidays = replace_na(count_special_holidays, 0)
+  )
+
+monthly_data_cleaned_flags <- monthly_data_cleaned_flags |>
+   # add a proper Date column set to the first day of each year month
+  mutate(date = make_date(Year, Month, 1))
+```
+
+# More tests and wrangling
+```{r}
+library(readr)
+library(dplyr)
+library(lubridate)
+
+# cleaning again
+tmp_hol <- tempfile(fileext = ".zip")
+download.file(
+  "https://data.worldpop.org/GIS/Holiday_Data/public_holidays/public_holidays_2010_2019.zip",
+  tmp_hol
+)
+global_holidays <- read_csv(tmp_hol) |>
+  mutate(
+    Date  = dmy(Date),
+    Year  = year(Date),
+    Month = month(Date)
+  ) |>
+  filter(Year >= 2010 & Year <= 2018)
+
+tmp_pass <- tempfile(fileext = ".zip")
+download.file(
+  "https://data.worldpop.org/GIS/Flight_Data/monthly_volume_of_airline_passengers/monthly_vol_of_airline_pass_in_90_countries_2010_2018.zip",
+  tmp_pass
+)
+monthly_passengers <- read_csv(tmp_pass) |>
+  mutate(
+    Year  = as.integer(Year),
+    Month = as.integer(Month)
+  ) |>
+  filter(Year >= 2010 & Year <= 2018)
+
+# combine travel trends
+holidays_travel <- monthly_passengers |>
+  # Total_OS for each ISO3–Year–Month
+  left_join(global_holidays, by = c("ISO3", "Year", "Month"))
+
+# summarize holiday counts
+holidays_summary_flags <- global_holidays |>
+  group_by(ISO3, ADM_name, Year, Month) |>
+  summarise(
+    num_total_holidays     = n(),
+    count_public_holidays  = sum(Type == "Public holiday",  na.rm = TRUE),
+    count_local_holidays   = sum(Type == "Local holiday",   na.rm = TRUE),
+    count_special_holidays = sum(Type == "Special holiday", na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# merge flags into monthly_data_cleaned_flags
+monthly_data_cleaned_flags <- monthly_passengers |>
+  left_join(holidays_summary_flags, by = c("ISO3", "Year", "Month")) |>
+  mutate(
+    num_total_holidays     = ifelse(is.na(num_total_holidays),     0, num_total_holidays),
+    count_public_holidays  = ifelse(is.na(count_public_holidays),  0, count_public_holidays),
+    count_local_holidays   = ifelse(is.na(count_local_holidays),   0, count_local_holidays),
+    count_special_holidays = ifelse(is.na(count_special_holidays), 0, count_special_holidays),
+    date = make_date(Year, Month, 1)
+  )
+
+# compute travel volume thresholds
+travel_percentiles <- holidays_travel |>
+  summarise(
+    low_thresh  = quantile(Total_OS, probs = 1/3, na.rm = TRUE),
+    high_thresh = quantile(Total_OS, probs = 2/3, na.rm = TRUE)
+  )
+
+# year range and latest_year
+year_range  <- range(holidays_travel$Year, na.rm = TRUE)
+latest_year <- max(holidays_travel$Year, na.rm = TRUE)
+
+```
